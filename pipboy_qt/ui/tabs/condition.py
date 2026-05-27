@@ -12,9 +12,10 @@ PILLARS = [
     ("agility",    "AGI", "AGILITY",    "ACTIVE MINUTES",    "Get 30+ active minutes"),
     ("focus",      "FOC", "FOCUS",      "THESIS + WRITING",  "Log a writing session"),
     ("tasks",      "TSK", "TASKS",      "CARRY WEIGHT",      "Complete or drop tasks"),
+    ("charisma",   "CHA", "CHARISMA",   "SOCIAL + CREATIVE", "Log time with friends/art"),
 ]
 PILLAR_ICONS = {"strength":"str","endurance":"end","perception":"per",
-                "agility":"agi","focus":"foc","tasks":"tsk"}
+                "agility":"agi","focus":"foc","tasks":"tsk","charisma":"cha"}
 
 class ConditionTab(QWidget):
     def __init__(self, data, token, parent=None):

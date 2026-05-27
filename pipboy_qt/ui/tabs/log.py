@@ -1,5 +1,6 @@
 """ui/tabs/log.py"""
 import time, threading
+from datetime import datetime
 from PyQt6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QScrollArea,
     QLabel, QLineEdit, QComboBox, QButtonGroup, QRadioButton
@@ -76,6 +77,28 @@ class LogTab(QWidget):
         self._morning_panel.layout().addWidget(self._morning_prompt)
         lay.addWidget(self._morning_panel)
 
+        # Evening check-in (only shown after 7pm)
+        lay.addWidget(SectionHeader("// EVENING STATUS CHECK"))
+        self._evening_panel = PipPanel(border_color=GREEN_DIM)
+        self._evening_done_lbl = label("", GREEN, 11)
+        self._evening_done_lbl.setWordWrap(True)
+        self._evening_panel.layout().addWidget(self._evening_done_lbl)
+        self._evening_done_lbl.hide()
+        self._evening_prompt = QWidget()
+        self._evening_prompt.setStyleSheet("background:transparent;")
+        el = QVBoxLayout(self._evening_prompt)
+        el.setContentsMargins(0, 0, 0, 0); el.setSpacing(6)
+        el.addWidget(label("HOW WAS YOUR DAY?", GREEN_DIM, 9))
+        ebtn_row = QHBoxLayout(); ebtn_row.setSpacing(4)
+        for n, lbl_t in [(1, "ROUGH"), (2, "TIRED"), (3, "OK"), (4, "GOOD"), (5, "GREAT")]:
+            col = RED if n <= 2 else AMBER if n == 3 else GREEN
+            btn = PipButton(f"{n}\n{lbl_t}", col); btn.setFixedWidth(52)
+            btn.clicked.connect(lambda _, v=n: self._log_evening(v))
+            ebtn_row.addWidget(btn)
+        ebtn_row.addStretch(); el.addLayout(ebtn_row)
+        self._evening_panel.layout().addWidget(self._evening_prompt)
+        lay.addWidget(self._evening_panel)
+
         # Custom trackers
         lay.addWidget(SectionHeader("// CUSTOM TRACKERS"))
         self._tc_panel = PipPanel()
@@ -103,6 +126,7 @@ class LogTab(QWidget):
         self._thesis   = data.get("thesis",{})
         self._rebuild_trackers()
         self._update_morning()
+        self._update_evening()
 
     def _update_morning(self):
         today = fb.today_key()
@@ -118,6 +142,30 @@ class LogTab(QWidget):
             self._morning_done_lbl.show()
         else:
             self._morning_prompt.show()
+
+    def _update_evening(self):
+        # Only show the evening panel after 7pm
+        if datetime.now().hour < 19:
+            self._evening_panel.hide()
+            return
+        self._evening_panel.show()
+
+        today = fb.today_key()
+        el    = self._thesis.get("energyLogs") or []
+        entry = next((l for l in el if l.get("date") == today), None)
+        logged = entry and entry.get("evening") is not None and entry.get("evening", 0) != 0
+        lvl   = entry.get("evening", 0) if entry else 0
+        lbls  = {1: "ROUGH", 2: "TIRED", 3: "OK", 4: "GOOD", 5: "GREAT"}
+        self._evening_done_lbl.hide(); self._evening_prompt.hide()
+        if logged:
+            col = RED if lvl <= 2 else AMBER if lvl == 3 else GREEN
+            self._evening_done_lbl.setStyleSheet(
+                f"color:{col};font-size:11px;background:transparent;")
+            self._evening_done_lbl.setText(
+                f"EVENING LOGGED: {lvl}/5 -- {lbls.get(lvl, '')}")
+            self._evening_done_lbl.show()
+        else:
+            self._evening_prompt.show()
 
     def _rebuild_trackers(self):
         # Remove old tracker buttons
@@ -207,6 +255,25 @@ class LogTab(QWidget):
             from PyQt6.QtCore import QTimer
             QTimer.singleShot(0, lambda: self._feedback(
                 f"MORNING ENERGY: {level}/5 -- {lbls.get(level,'')}", GREEN))
+            QTimer.singleShot(0, self._on_action)
+        threading.Thread(target=run, daemon=True).start()
+
+    def _log_evening(self, level):
+        def run():
+            thesis = dict(self._thesis)
+            logs   = list(thesis.get("energyLogs") or [])
+            today  = fb.today_key()
+            ex = next((l for l in logs if l.get("date") == today), None)
+            if ex:
+                ex["evening"] = level
+            else:
+                logs.append({"date": today, "morning": 0, "evening": level, "mood": 0, "sleepH": None})
+            thesis["energyLogs"] = logs
+            fb.save_thesis(self._uid, self._token, thesis)
+            lbls = {1: "ROUGH", 2: "TIRED", 3: "OK", 4: "GOOD", 5: "GREAT"}
+            from PyQt6.QtCore import QTimer
+            QTimer.singleShot(0, lambda: self._feedback(
+                f"EVENING ENERGY: {level}/5 -- {lbls.get(level, '')}", GREEN))
             QTimer.singleShot(0, self._on_action)
         threading.Thread(target=run, daemon=True).start()
 

@@ -1,21 +1,24 @@
 """
 main_window.py
 --------------
-The root QMainWindow. Frameless, always-on-top, draggable,
-system tray icon, tab container. Owns the data refresh loop.
+Compact bar (56px, always-on-top) + collapsible panel design.
+Bar shows context-sensitive stats; panel shows full tab set.
 """
 
 import sys, threading, time
+from datetime import datetime as _dt
+
 from PyQt6.QtWidgets import (
-    QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QWidget, QVBoxLayout, QHBoxLayout,
     QTabWidget, QLabel, QPushButton, QSystemTrayIcon,
-    QMenu, QApplication, QSizePolicy, QFrame
+    QMenu, QApplication, QSizePolicy, QFrame, QStackedWidget
 )
-from PyQt6.QtCore  import Qt, QTimer, QThread, pyqtSignal, QPoint, QObject
+from PyQt6.QtCore  import Qt, QTimer, QThread, pyqtSignal, QPoint, QObject, QRect
 from PyQt6.QtGui   import QIcon, QPixmap, QPainter, QColor, QPen, QFont, QCursor
 
 import firebase as fb
-from ui.style  import BLACK, SURF, SURF_MID, GREEN, GREEN_DIM, AMBER, RED, TEXT_DIM
+from ui.style  import (BLACK, SURF, SURF_MID, GREEN, GREEN_DIM, AMBER, RED,
+                        TEXT_DIM, TEXT_MUTED)
 from ui.widgets import SectionHeader, PipButton, PipIcon, label, h_line
 
 # Tab imports
@@ -27,14 +30,21 @@ from ui.tabs.writing   import WritingTab
 from ui.tabs.goals     import GoalsTab
 from ui.tabs.notes     import NotesTab
 from ui.tabs.focus     import FocusTab
+from ui.tabs.jobs      import JobsTab
+
+# ── Window geometry constants ──────────────────────────────────
+_W     = 340    # fixed window width
+_BAR_H = 56     # compact bar height
+_PAN_H = 560    # expanded panel height
+_TOT_H = _BAR_H + _PAN_H
 
 
 # ── Login worker thread ────────────────────────────────────────
 class LoginWorker(QThread):
     """Runs Google device flow in a QThread so signals work correctly."""
-    success = pyqtSignal(dict)   # emits auth dict
-    error   = pyqtSignal(str)    # emits error message
-    status  = pyqtSignal(str)    # emits status text for the UI
+    success = pyqtSignal(dict)
+    error   = pyqtSignal(str)
+    status  = pyqtSignal(str)
 
     def run(self):
         from pipboy_auth import (
@@ -63,13 +73,12 @@ class DataWorker(QThread):
     def __init__(self, uid, get_token_fn):
         super().__init__()
         self._uid       = uid
-        self._get_token = get_token_fn   # callable returning current token
+        self._get_token = get_token_fn
         self._running   = True
 
     def run(self):
         while self._running:
             self._fetch()
-            # Sleep 30s in small chunks so we can stop quickly
             for _ in range(60):
                 if not self._running: return
                 time.sleep(0.5)
@@ -83,15 +92,13 @@ class DataWorker(QThread):
 
         self.status_ready.emit("SYNCING...", AMBER)
 
-        # Check + refresh token synchronously
         session = fb.load_session()
         session, token = fb.maybe_refresh_token(session)
 
         data = fb.fetch_all(self._uid, token)
 
         if data.get("_auth_error"):
-            # Try one inline refresh then retry
-            rtok = (session or {}).get("refresh_token","")
+            rtok = (session or {}).get("refresh_token", "")
             if rtok:
                 new_id, new_ref = fb.refresh_id_token(rtok)
                 if new_id:
@@ -115,21 +122,17 @@ class DataWorker(QThread):
         self._running = False
 
 
-# ── Pip-Boy icon ───────────────────────────────────────────────
+# ── Tray icon helper ───────────────────────────────────────────
 def _make_tray_icon():
-    """Draw a 32x32 Pip-Boy icon for the system tray."""
     px = QPixmap(32, 32)
-    px.fill(QColor(0,0,0,0))
+    px.fill(QColor(0, 0, 0, 0))
     p = QPainter(px)
     p.setRenderHint(QPainter.RenderHint.Antialiasing)
-    # Background circle
     p.setBrush(QColor(BLACK))
     p.setPen(QPen(QColor(GREEN), 2))
     p.drawEllipse(1, 1, 30, 30)
-    # Inner ring
     p.setPen(QPen(QColor(GREEN_DIM), 1))
     p.drawEllipse(5, 5, 22, 22)
-    # Health cross
     p.setPen(QPen(QColor(GREEN), 2))
     p.drawLine(16, 8, 16, 24)
     p.drawLine(8, 16, 24, 16)
@@ -194,175 +197,340 @@ class LoginScreen(QWidget):
         self._btn.setText("AUTHENTICATING..." if busy else "SIGN IN WITH GOOGLE")
 
 
-# ── Title bar ──────────────────────────────────────────────────
-class TitleBar(QWidget):
-    close_clicked  = pyqtSignal()
-    minimise_clicked = pyqtSignal()
+# ── Compact Bar ────────────────────────────────────────────────
+class CompactBar(QWidget):
+    """Always-visible 56px bar drawn with QPainter. Context-sensitive stats."""
+    expand_clicked = pyqtSignal()
+
+    # Current display state
+    _cond_score  = 0
+    _cond_col    = GREEN_DIM
+    _status_text = "INITIALIZING..."
+    _status_col  = AMBER
+    _stats       = []     # list of 3 dicts: {label, value, pct, color}
+    _right_text  = ""
+    _right_value = ""
+    _right_col   = GREEN_DIM
+    _expanded    = False
 
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedHeight(34)
-        self.setStyleSheet(f"background: {SURF}; border-bottom: 1px solid {SURF_MID};")
-        lay = QHBoxLayout(self)
-        lay.setContentsMargins(10, 0, 8, 0)
-        lay.setSpacing(8)
-
-        icon = PipIcon("condition", GREEN, 20, self)
-        lay.addWidget(icon)
-
-        title = QLabel("PIP-BOY 3000")
-        title.setStyleSheet(
-            f"color: {GREEN}; font-size: 11px; font-weight: bold;"
-            f" letter-spacing: 2px; background: transparent;")
-        lay.addWidget(title)
-
-        sep = QLabel("//")
-        sep.setStyleSheet(f"color: {SURF_MID}; font-size: 11px; background: transparent;")
-        lay.addWidget(sep)
-
-        self._user_lbl = QLabel("NOT SIGNED IN")
-        self._user_lbl.setStyleSheet(
-            f"color: {GREEN_DIM}; font-size: 9px; background: transparent;")
-        lay.addWidget(self._user_lbl)
-
-        lay.addStretch()
-
-        self._dot = QLabel("●")
-        self._dot.setStyleSheet(f"color: {AMBER}; font-size: 8px; background: transparent;")
-        lay.addWidget(self._dot)
-
-        self._status_lbl = QLabel("INITIALIZING...")
-        self._status_lbl.setStyleSheet(
-            f"color: {GREEN_DIM}; font-size: 9px; background: transparent;")
-        lay.addWidget(self._status_lbl)
-
-        lay.addSpacing(12)
-
-        min_btn = QPushButton("—")
-        min_btn.setFixedSize(24, 24)
-        min_btn.setStyleSheet(f"""
-            QPushButton {{ background: transparent; color: {GREEN_DIM};
-                           border: none; font-size: 12px; }}
-            QPushButton:hover {{ color: {GREEN}; background: rgba(0,255,102,0.1); }}
-        """)
-        min_btn.clicked.connect(self.minimise_clicked)
-        lay.addWidget(min_btn)
-
-        close_btn = QPushButton("✕")
-        close_btn.setFixedSize(24, 24)
-        close_btn.setStyleSheet(f"""
-            QPushButton {{ background: transparent; color: {RED};
-                           border: none; font-size: 12px; }}
-            QPushButton:hover {{ background: rgba(255,51,51,0.15); }}
-        """)
-        close_btn.clicked.connect(self.close_clicked)
-        lay.addWidget(close_btn)
-
-        # Drag support
+        self.setFixedSize(_W, _BAR_H)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
         self._drag_pos = None
 
-    def set_user(self, email):
-        self._user_lbl.setText(email or "SIGNED IN")
+    def set_expanded(self, v):
+        self._expanded = v
+        self.update()
+
+    def update_data(self, data):
+        d = data.get("daily", {})
+        g = data.get("goals", {})
+
+        # Condition score
+        self._cond_score = int(fb.sf(d.get("condition") or d.get("overall")))
+        self._cond_col = (GREEN if self._cond_score >= 65
+                          else AMBER if self._cond_score >= 35 else RED)
+
+        # Context stats
+        hour   = _dt.now().hour
+        water  = float(d.get("water")  or 0);  wg  = float(g.get("waterGoalL")   or 3.0)
+        sleep  = float(d.get("sleep")  or 0);  slg = float(g.get("sleepGoalH")   or 8.0)
+        steps  = float(d.get("steps")  or 0);  stg = float(g.get("stepGoal")     or 7500)
+        active = float(d.get("active") or 0);  ag  = float(g.get("activeGoalMin") or 30)
+        thesis = data.get("thesis", {})
+        todos  = data.get("todos", [])
+
+        def fmt(v):
+            return f"{v/1000:.1f}K" if v >= 1000 else str(int(v))
+
+        today_key = fb.today_key()
+        today_words = next(
+            (int(l.get("words", 0) or 0)
+             for l in (thesis.get("writingLogs") or [])
+             if l.get("date") == today_key),
+            0
+        )
+        pending_tasks = sum(1 for t in todos if not t.get("done"))
+
+        all_stats = {
+            "H2O": (f"{water:.1f}L", water / max(0.01, wg),
+                    GREEN if water / max(0.01, wg) >= 0.25 else RED),
+            "ZZZ": (f"{sleep:.1f}H", sleep / max(0.01, slg),
+                    GREEN if sleep / max(0.01, slg) >= 0.625 else RED),
+            "STP": (fmt(steps), steps / max(1, stg),
+                    GREEN if steps / max(1, stg) >= 0.25 else RED),
+            "ACT": (f"{int(active)}M", active / max(1, ag),
+                    GREEN if active / max(1, ag) >= 0.33 else RED),
+            "WRD": (f"{today_words}", min(1.0, today_words / 500), AMBER),
+            "TSK": (f"{pending_tasks}", max(0, 1.0 - pending_tasks / 10),
+                    AMBER if pending_tasks > 0 else GREEN),
+        }
+
+        if 4 <= hour < 12:
+            order = ["ZZZ", "H2O", "STP"]
+        elif 12 <= hour < 19:
+            order = ["H2O", "STP", "ACT"]
+        else:
+            order = ["H2O", "WRD", "TSK"]
+
+        # Override: critical stats (below 25% of goal) always get shown first
+        critical = [k for k in ["H2O", "ZZZ", "STP", "ACT"]
+                    if all_stats[k][2] == RED and k not in order[:1]]
+        for k in critical:
+            if k not in order:
+                order.pop()
+                order.insert(0, k)
+
+        self._stats = [
+            {"label": k, "value": all_stats[k][0],
+             "pct": all_stats[k][1], "color": all_stats[k][2]}
+            for k in order[:3]
+        ]
+
+        # Right section
+        defence = str(thesis.get("defenceDate") or "").strip()
+        self._right_text  = ""
+        self._right_value = ""
+        self._right_col   = GREEN_DIM
+        if defence:
+            try:
+                from datetime import datetime
+                days = (datetime.strptime(defence, "%Y-%m-%d") - datetime.now()).days
+                if days <= 60:
+                    self._right_text  = "DEF"
+                    self._right_value = str(days)
+                    self._right_col   = (RED if days < 14
+                                         else AMBER if days < 30 else GREEN)
+            except Exception:
+                pass
+
+        if not self._right_value:
+            cond = self._cond_score
+            labels = [(95, "OPTM"), (80, "FULL"), (65, "IRRD"),
+                      (50, "STMP"), (35, "CRIT"), (20, "DMGD"), (0, "MDIC")]
+            self._right_text  = next((l for t, l in labels if cond >= t), "----")
+            self._right_value = ""
+            self._right_col   = (GREEN if cond >= 65
+                                  else AMBER if cond >= 35 else RED)
+
+        self.update()
 
     def set_status(self, text, color):
-        self._status_lbl.setText(text)
-        self._status_lbl.setStyleSheet(
-            f"color: {color}; font-size: 9px; background: transparent;")
-        dot_col = GREEN if color == GREEN_DIM else color
-        self._dot.setStyleSheet(
-            f"color: {dot_col}; font-size: 8px; background: transparent;")
+        self._status_text = text
+        self._status_col  = color
+        self.update()
 
+    # ── Drawing ────────────────────────────────────────────────
+    def paintEvent(self, e):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.RenderHint.Antialiasing)
+        w, h = self.width(), self.height()
+
+        # Background
+        p.fillRect(0, 0, w, h, QColor(BLACK))
+
+        # Phosphor border (multi-layer glow)
+        for alpha, thickness in [(30, 3), (60, 2), (120, 1)]:
+            bc = QColor(GREEN_DIM)
+            bc.setAlpha(alpha)
+            pen = QPen(bc, thickness)
+            p.setPen(pen)
+            p.drawRect(0, 0, w - 1, h - 1)
+
+        # ── Left: condition score ──────────────────────────────
+        lx = 8
+        score_str = str(self._cond_score) if self._cond_score else "--"
+        p.setPen(QColor(self._cond_col))
+        f_big = QFont("Courier New", 18, QFont.Weight.Bold)
+        p.setFont(f_big)
+        p.drawText(QRect(lx, 4, 50, 28), Qt.AlignmentFlag.AlignLeft, score_str)
+
+        f_tiny = QFont("Courier New", 7)
+        p.setFont(f_tiny)
+        p.setPen(QColor(TEXT_MUTED))
+        p.drawText(QRect(lx, 30, 50, 12), Qt.AlignmentFlag.AlignLeft, "COND")
+
+        # Divider after left section
+        div_x1 = 62
+        p.setPen(QPen(QColor(SURF_MID), 1))
+        p.drawLine(div_x1, 6, div_x1, h - 10)
+
+        # ── Middle: 3 stat columns ─────────────────────────────
+        mid_start = div_x1 + 4
+        mid_end   = w - 72   # leave room for right section + button
+        mid_w     = mid_end - mid_start
+        col_w     = mid_w // 3
+
+        for i, stat in enumerate(self._stats[:3]):
+            cx = mid_start + i * col_w
+            col = stat["color"]
+
+            # Label
+            p.setPen(QColor(TEXT_MUTED))
+            f_lbl = QFont("Courier New", 7)
+            p.setFont(f_lbl)
+            p.drawText(QRect(cx, 5, col_w - 2, 10),
+                       Qt.AlignmentFlag.AlignLeft, stat["label"])
+
+            # Value
+            p.setPen(QColor(col))
+            f_val = QFont("Courier New", 10, QFont.Weight.Bold)
+            p.setFont(f_val)
+            p.drawText(QRect(cx, 14, col_w - 2, 16),
+                       Qt.AlignmentFlag.AlignLeft, stat["value"])
+
+            # Mini 6-segment bar
+            pct = max(0.0, min(1.0, stat["pct"]))
+            filled = int(pct * 6)
+            seg_w = (col_w - 4) // 6
+            for s in range(6):
+                sx = cx + s * (seg_w + 1)
+                if s < filled:
+                    bc = QColor(col)
+                    bc.setAlpha(200)
+                else:
+                    bc = QColor(SURF_MID)
+                p.fillRect(sx, 35, max(1, seg_w), 5, bc)
+
+        # Divider before right section
+        div_x2 = mid_end + 2
+        p.setPen(QPen(QColor(SURF_MID), 1))
+        p.drawLine(div_x2, 6, div_x2, h - 10)
+
+        # ── Right section ──────────────────────────────────────
+        rx = div_x2 + 4
+        rw = 38
+        if self._right_value:
+            # Large number (e.g. defence days)
+            p.setPen(QColor(self._right_col))
+            p.setFont(QFont("Courier New", 14, QFont.Weight.Bold))
+            p.drawText(QRect(rx, 6, rw, 20),
+                       Qt.AlignmentFlag.AlignLeft, self._right_value)
+            p.setPen(QColor(TEXT_MUTED))
+            p.setFont(QFont("Courier New", 7))
+            p.drawText(QRect(rx, 26, rw, 10),
+                       Qt.AlignmentFlag.AlignLeft, self._right_text)
+        else:
+            # Condition label text
+            p.setPen(QColor(self._right_col))
+            p.setFont(QFont("Courier New", 8, QFont.Weight.Bold))
+            p.drawText(QRect(rx, 10, rw, 20),
+                       Qt.AlignmentFlag.AlignLeft, self._right_text)
+
+        # ── Expand button ──────────────────────────────────────
+        bx = w - 20
+        p.setPen(QColor(GREEN_DIM))
+        p.setFont(QFont("Courier New", 10))
+        arrow = "▲" if self._expanded else "▼"
+        p.drawText(QRect(bx, 16, 16, 16),
+                   Qt.AlignmentFlag.AlignCenter, arrow)
+
+        # ── Bottom status strip ────────────────────────────────
+        sc = QColor(self._status_col)
+        sc.setAlpha(180)
+        p.setPen(sc)
+        p.setFont(QFont("Courier New", 7))
+        p.drawText(QRect(4, h - 11, w - 8, 10),
+                   Qt.AlignmentFlag.AlignLeft, self._status_text[:60])
+
+        # ── Scanline overlay ───────────────────────────────────
+        scan_col = QColor(0, 0, 0, 22)
+        y = 0
+        while y < h:
+            p.fillRect(0, y, w, 1, scan_col)
+            y += 3
+
+    # ── Mouse events ───────────────────────────────────────────
     def mousePressEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
             self._drag_pos = e.globalPosition().toPoint()
+            self._drag_start_win = self.window().pos()
 
     def mouseMoveEvent(self, e):
         if self._drag_pos and e.buttons() == Qt.MouseButton.LeftButton:
             delta = e.globalPosition().toPoint() - self._drag_pos
-            self._drag_pos = e.globalPosition().toPoint()
-            self.window().move(self.window().pos() + delta)
+            self.window().move(self._drag_start_win + delta)
 
     def mouseReleaseEvent(self, e):
         if e.button() == Qt.MouseButton.LeftButton:
-            # Save position on release
             cfg = fb.load_config()
             pos = self.window().pos()
             cfg["x"] = pos.x(); cfg["y"] = pos.y()
             fb.save_config(cfg)
+            # If mouse barely moved, treat as click → toggle
+            if self._drag_pos:
+                delta = e.globalPosition().toPoint() - self._drag_pos
+                if abs(delta.x()) < 5 and abs(delta.y()) < 5:
+                    self.expand_clicked.emit()
             self._drag_pos = None
 
 
 # ── Main window ────────────────────────────────────────────────
-class PipBoyWindow(QMainWindow):
+class PipBoyWindow(QWidget):
+    """Frameless always-on-top window: compact bar + collapsible panel."""
+
     def __init__(self):
         super().__init__()
 
-        # Frameless + always on top
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint |
             Qt.WindowType.WindowStaysOnTopHint |
-            Qt.WindowType.Tool   # keeps off taskbar alt-tab list
+            Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        self.setAttribute(Qt.WidgetAttribute.WA_NoSystemBackground)
+
+        self._session    = None
+        self._token      = None
+        self._uid        = None
+        self._worker     = None
+        self._data       = {}
+        self._expanded   = False
+        self._last_theme = None
 
         # Size + position
-        cfg = fb.load_config()
-        w, h = 320, 600
+        cfg    = fb.load_config()
         screen = QApplication.primaryScreen().availableGeometry()
-        x = cfg.get("x", screen.width()  - w - 16)
-        y = cfg.get("y", screen.height() - h - 50)
-        self.setGeometry(x, y, w, h)
-        self.setMinimumSize(280, 400)
+        x = cfg.get("x", screen.width()  - _W  - 16)
+        y = cfg.get("y", screen.height() - _BAR_H - 50)
+        self.setGeometry(x, y, _W, _BAR_H)
 
-        self._session = None
-        self._token   = None
-        self._uid     = None
-        self._worker  = None
-        self._data    = {}
-
-        self._build_ui()
+        self._build()
         self._build_tray()
         self._try_auto_login()
 
-    # ── UI ─────────────────────────────────────────────────────
-    def _build_ui(self):
-        # Outer frame with 1px green border
-        outer = QWidget()
-        outer.setStyleSheet(f"""
-            QWidget {{
-                background-color: {BLACK};
-                border: 1px solid {GREEN_DIM};
-            }}
-        """)
-        self.setCentralWidget(outer)
+    # ── Build UI ───────────────────────────────────────────────
+    def _build(self):
+        root = QVBoxLayout(self)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
 
-        root_lay = QVBoxLayout(outer)
-        root_lay.setContentsMargins(1, 1, 1, 1)
-        root_lay.setSpacing(0)
+        # Compact bar
+        self._bar = CompactBar(self)
+        self._bar.expand_clicked.connect(self._toggle_expanded)
+        root.addWidget(self._bar)
 
-        # Title bar
-        self._title_bar = TitleBar(self)
-        self._title_bar.close_clicked.connect(self._on_close)
-        self._title_bar.minimise_clicked.connect(self.showMinimized)
-        root_lay.addWidget(self._title_bar)
+        # Collapsible panel
+        self._panel = QWidget(self)
+        self._panel.setFixedSize(_W, _PAN_H)
+        self._panel.setStyleSheet(
+            f"background: {BLACK}; border: 1px solid {GREEN_DIM};")
+        self._panel.hide()
+        root.addWidget(self._panel)
 
-        # Separator
-        sep = QFrame()
-        sep.setFrameShape(QFrame.Shape.HLine)
-        sep.setStyleSheet(f"background: {GREEN_DIM}; max-height: 1px; border: none;")
-        root_lay.addWidget(sep)
+        panel_lay = QVBoxLayout(self._panel)
+        panel_lay.setContentsMargins(1, 1, 1, 1)
+        panel_lay.setSpacing(0)
 
-        # Stack: login screen OR tabs
-        self._stack = QWidget()
-        stack_lay   = QVBoxLayout(self._stack)
-        stack_lay.setContentsMargins(0, 0, 0, 0)
-        stack_lay.setSpacing(0)
-        root_lay.addWidget(self._stack)
+        # Stacked widget: login OR tabs
+        self._stack = QStackedWidget()
+        panel_lay.addWidget(self._stack)
 
         # Login screen
         self._login_screen = LoginScreen()
         self._login_screen.sign_in_clicked.connect(self._start_login)
-        stack_lay.addWidget(self._login_screen)
+        self._stack.addWidget(self._login_screen)  # index 0
 
         # Tab widget (hidden until signed in)
         self._tabs = QTabWidget()
@@ -378,9 +546,9 @@ class PipBoyWindow(QMainWindow):
                 background: {SURF};
                 color: {GREEN_DIM};
                 font-family: "Courier New";
-                font-size: 10px;
+                font-size: 9px;
                 font-weight: bold;
-                padding: 8px 10px;
+                padding: 6px 8px;
                 border: none;
                 border-bottom: 2px solid transparent;
                 letter-spacing: 1px;
@@ -395,8 +563,7 @@ class PipBoyWindow(QMainWindow):
                 background: rgba(0,255,102,0.05);
             }}
         """)
-        stack_lay.addWidget(self._tabs)
-        self._tabs.hide()
+        self._stack.addWidget(self._tabs)   # index 1
 
     def _build_tabs(self):
         """Called once after sign-in. Creates all tab widgets."""
@@ -406,18 +573,20 @@ class PipBoyWindow(QMainWindow):
         self._tab_tasks     = TasksTab(self._uid, self._token)
         self._tab_writing   = WritingTab(self._uid, self._token)
         self._tab_goals     = GoalsTab(self._uid, self._token)
+        self._tab_jobs      = JobsTab(self._uid, self._token)
         self._tab_notes     = NotesTab(self._uid, self._token)
         self._tab_focus     = FocusTab(self._uid, self._token)
 
         for tab, name in [
-            (self._tab_health,    "HEALTH"),
-            (self._tab_condition, "SPECIAL"),
+            (self._tab_health,    "HLTH"),
+            (self._tab_condition, "SPEC"),
             (self._tab_log,       "LOG"),
-            (self._tab_tasks,     "TASKS"),
-            (self._tab_writing,   "WRITING"),
-            (self._tab_goals,     "GOALS"),
-            (self._tab_notes,     "NOTES"),
-            (self._tab_focus,     "FOCUS"),
+            (self._tab_tasks,     "TASK"),
+            (self._tab_writing,   "WRTE"),
+            (self._tab_goals,     "GOAL"),
+            (self._tab_jobs,      "JOBS"),
+            (self._tab_notes,     "NOTE"),
+            (self._tab_focus,     "FOCU"),
         ]:
             self._tabs.addTab(tab, name)
 
@@ -447,9 +616,8 @@ class PipBoyWindow(QMainWindow):
         """)
         menu.addAction("Pip-Boy Health").setEnabled(False)
         menu.addSeparator()
-        for tab_name in ["Health","Special","Log","Tasks","Writing","Goals","Notes","Focus"]:
-            idx = ["Health","Special","Log","Tasks","Writing","Goals","Notes","Focus"].index(tab_name)
-            menu.addAction(tab_name.upper(), lambda i=idx: self._show_tab(i))
+        show_act = menu.addAction("SHOW / HIDE")
+        show_act.triggered.connect(self._tray_toggle)
         menu.addSeparator()
         menu.addAction("QUIT", QApplication.quit)
 
@@ -457,38 +625,45 @@ class PipBoyWindow(QMainWindow):
         self._tray.activated.connect(self._tray_activated)
         self._tray.show()
 
-    def _show_tab(self, idx):
-        self.show()
-        self.raise_()
-        self.activateWindow()
-        if self._tabs.isVisible():
-            self._tabs.setCurrentIndex(idx)
+    # ── Toggle expanded panel ──────────────────────────────────
+    def _toggle_expanded(self):
+        self._expanded = not self._expanded
+        self._bar.set_expanded(self._expanded)
 
-    def _tray_activated(self, reason):
-        if reason == QSystemTrayIcon.ActivationReason.Trigger:
-            if self.isVisible():
-                self.hide()
-            else:
-                self.show()
-                self.raise_()
-                self.activateWindow()
+        if self._expanded:
+            self._panel.show()
+            self.setFixedSize(_W, _TOT_H)
+            # Keep window on screen
+            screen = QApplication.primaryScreen().availableGeometry()
+            pos    = self.pos()
+            new_y  = min(pos.y(), screen.bottom() - _TOT_H)
+            if new_y != pos.y():
+                self.move(pos.x(), new_y)
+        else:
+            self._panel.hide()
+            self.setFixedSize(_W, _BAR_H)
+
+        # Save position
+        cfg = fb.load_config()
+        pos = self.pos()
+        cfg["x"] = pos.x(); cfg["y"] = pos.y()
+        fb.save_config(cfg)
 
     # ── Auth ───────────────────────────────────────────────────
     def _try_auto_login(self):
-        """Check for saved session and sign in automatically."""
         session = fb.load_session()
         if session and session.get("id_token") and session.get("uid"):
             self._session = session
             self._token   = session["id_token"]
             self._uid     = session["uid"]
-            email         = session.get("email","")
-            self._on_signed_in(email)
+            self._on_signed_in(session.get("email", ""))
         else:
-            self._login_screen.show()
-            self._tabs.hide()
+            # Show login screen — auto-expand panel
+            self._stack.setCurrentIndex(0)
+            if not self._expanded:
+                self._toggle_expanded()
 
     def _start_login(self):
-        """Launch Google device flow in a QThread so signals reach the main thread."""
         self._login_screen.set_busy(True)
         self._login_screen.set_status("OPENING BROWSER...", AMBER)
 
@@ -503,7 +678,7 @@ class PipBoyWindow(QMainWindow):
         self._session = auth
         self._token   = auth["id_token"]
         self._uid     = auth["uid"]
-        self._on_signed_in(auth.get("email",""))
+        self._on_signed_in(auth.get("email", ""))
 
     def _on_login_error(self, msg):
         self._login_screen.set_busy(False)
@@ -511,57 +686,87 @@ class PipBoyWindow(QMainWindow):
         self._login_worker = None
 
     def _on_signed_in(self, email):
-        self._login_screen.hide()
         self._build_tabs()
-        self._tabs.show()
-        self._title_bar.set_user(email)
+        self._stack.setCurrentIndex(1)   # show tabs
+        self._bar.set_status(f"SIGNED IN: {(email or 'USER')[:20]}", GREEN_DIM)
         self._start_worker()
 
     def _start_worker(self):
         self._worker = DataWorker(self._uid, lambda: self._token)
         self._worker.data_ready.connect(self._on_data)
-        self._worker.status_ready.connect(self._title_bar.set_status)
+        self._worker.status_ready.connect(self._bar.set_status)
         self._worker.start()
-        # Immediate first fetch
         self._worker.fetch_now()
 
     # ── Data ───────────────────────────────────────────────────
     def _on_data(self, data):
-        """Called on main thread when fresh data arrives."""
-        # Update token if it was refreshed
         if "_token" in data:
             self._token = data.pop("_token")
 
         self._data = data
 
-        # Push data to all tabs
+        # Theme color
+        theme = str(data.get("theme_color") or "#00FF66")
+        if self._last_theme != theme:
+            self._apply_theme(theme)
+            self._last_theme = theme
+
+        # Update compact bar
+        self._bar.update_data(data)
+
+        # Push data to tabs if they exist
+        if not hasattr(self, "_tab_health"):
+            return
+
         for tab in [
             self._tab_health, self._tab_condition,
             self._tab_tasks,  self._tab_writing,
             self._tab_goals,  self._tab_notes,
+            self._tab_jobs,
         ]:
             tab.update_data(data)
 
-        # Update log and focus tabs with fresh token
         self._tab_log.set_token(self._token)
         self._tab_focus.set_token(self._token)
 
+        # Push data to log tab too
+        self._tab_log.update_data(data)
+
+    def _apply_theme(self, hex_color):
+        """Apply the phone app's chosen theme colour to style module globals."""
+        import ui.style as _style
+        try:
+            int(hex_color.lstrip("#"), 16)
+            g  = hex_color
+            r, gr, b = [int(hex_color.lstrip("#")[i:i+2], 16) for i in (0, 2, 4)]
+            gd = "#{:02x}{:02x}{:02x}".format(
+                max(0, int(r * 0.65)),
+                max(0, int(gr * 0.65)),
+                max(0, int(b * 0.65))
+            )
+            _style.GREEN     = g
+            _style.GREEN_DIM = gd
+        except Exception:
+            pass
+
     def _on_log_action(self):
-        """Called after a log action — trigger immediate refresh."""
         if self._worker:
             self._worker.fetch_now()
 
-    # ── Close / minimise ───────────────────────────────────────
-    def _on_close(self):
-        cfg = fb.load_config()
-        pos = self.pos()
-        cfg["x"] = pos.x(); cfg["y"] = pos.y()
-        fb.save_config(cfg)
-        if self._worker:
-            self._worker.stop()
-        self._tray.hide()
-        QApplication.quit()
+    # ── Tray helpers ───────────────────────────────────────────
+    def _tray_toggle(self):
+        if self.isVisible():
+            self.hide()
+        else:
+            self.show()
+            self.raise_()
+            self.activateWindow()
 
+    def _tray_activated(self, reason):
+        if reason == QSystemTrayIcon.ActivationReason.Trigger:
+            self._tray_toggle()
+
+    # ── Close → hide to tray ───────────────────────────────────
     def closeEvent(self, e):
         e.ignore()
-        self.hide()   # Hide to tray instead of closing
+        self.hide()

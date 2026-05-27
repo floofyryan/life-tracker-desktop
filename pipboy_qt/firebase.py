@@ -204,6 +204,7 @@ def fetch_all(uid, token):
     tc_doc    = fs_get(f"users/{uid}/settings/trackers",   token)
     lg_doc    = fs_get(f"users/{uid}/settings/lifegoals",  token)
     dl_doc    = fs_get(f"users/{uid}/settings/deadlines",  token)
+    ja_doc    = fs_get(f"users/{uid}/settings/jobapps",   token)
 
     # Today's logs
     logs_raw, _ = fs_list(f"users/{uid}/logs", token)
@@ -219,14 +220,16 @@ def fetch_all(uid, token):
             logs.append(f)
 
     return {
-        "daily":      daily,
-        "goals":      goals,
-        "thesis":     thesis,
-        "todos":      todos_doc.get("items", []) or [],
-        "trackers":   tc_doc.get("configs", []) or [],
-        "life_goals": lg_doc.get("items", []) or [],
-        "deadlines":  dl_doc.get("items", []) or [],
-        "logs":       logs,
+        "daily":       daily,
+        "goals":       goals,
+        "thesis":      thesis,
+        "todos":       todos_doc.get("items", []) or [],
+        "trackers":    tc_doc.get("configs", []) or [],
+        "life_goals":  lg_doc.get("items", []) or [],
+        "deadlines":   dl_doc.get("items", []) or [],
+        "logs":        logs,
+        "job_apps":    ja_doc.get("apps", []) or [],
+        "theme_color": str(goals.get("themeColor") or "#00FF66"),
     }
 
 def tracker_totals(logs):
