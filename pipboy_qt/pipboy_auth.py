@@ -21,9 +21,25 @@ FIRESTORE  = (
     f"/databases/(default)/documents"
 )
 
-# Paste your Desktop OAuth credentials here (see setup instructions)
+# OAuth credentials — set these once. Shared with the root pipboy_auth.py.
+# If you have already filled them in the root pipboy_auth.py you can import
+# from there instead, but keeping them here makes this module self-contained.
 CLIENT_ID     = ""
 CLIENT_SECRET = ""
+
+# Try to inherit credentials from the root module if this file's own are blank.
+try:
+    import sys as _sys, os as _os
+    _root = _os.path.dirname(_os.path.dirname(_os.path.abspath(__file__)))
+    if _root not in _sys.path:
+        _sys.path.insert(0, _root)
+    import importlib as _il
+    _root_auth = _il.import_module("pipboy_auth")
+    if not CLIENT_ID:
+        CLIENT_ID     = getattr(_root_auth, "CLIENT_ID",     "")
+        CLIENT_SECRET = getattr(_root_auth, "CLIENT_SECRET", "")
+except Exception:
+    pass
 
 # ── Safe print (handles Windows cp1252 terminals) ──────────────
 def p(text=""):

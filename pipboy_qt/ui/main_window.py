@@ -11,7 +11,7 @@ from PyQt6.QtWidgets import (
     QTabWidget, QLabel, QPushButton, QSystemTrayIcon,
     QMenu, QApplication, QSizePolicy, QFrame
 )
-from PyQt6.QtCore  import Qt, QTimer, QThread, pyqtSignal, QPoint
+from PyQt6.QtCore  import Qt, QTimer, QThread, pyqtSignal, QPoint, QObject
 from PyQt6.QtGui   import QIcon, QPixmap, QPainter, QColor, QPen, QFont, QCursor
 
 import firebase as fb
@@ -27,6 +27,31 @@ from ui.tabs.writing   import WritingTab
 from ui.tabs.goals     import GoalsTab
 from ui.tabs.notes     import NotesTab
 from ui.tabs.focus     import FocusTab
+
+
+# ── Login worker thread ────────────────────────────────────────
+class LoginWorker(QThread):
+    """Runs Google device flow in a QThread so signals work correctly."""
+    success = pyqtSignal(dict)   # emits auth dict
+    error   = pyqtSignal(str)    # emits error message
+    status  = pyqtSignal(str)    # emits status text for the UI
+
+    def run(self):
+        from pipboy_auth import (
+            CLIENT_ID, CLIENT_SECRET,
+            device_login, firebase_sign_in,
+            save_token
+        )
+        try:
+            self.status.emit("OPENING BROWSER...")
+            access = device_login(CLIENT_ID, CLIENT_SECRET)
+            self.status.emit("AUTHENTICATING WITH FIREBASE...")
+            auth = firebase_sign_in(access)
+            auth["issued_at"] = int(time.time())
+            save_token(auth)
+            self.success.emit(auth)
+        except Exception as e:
+            self.error.emit(str(e))
 
 
 # ── Data worker thread ─────────────────────────────────────────
@@ -463,27 +488,16 @@ class PipBoyWindow(QMainWindow):
             self._tabs.hide()
 
     def _start_login(self):
-        """Launch Google device flow in a background thread."""
+        """Launch Google device flow in a QThread so signals reach the main thread."""
         self._login_screen.set_busy(True)
         self._login_screen.set_status("OPENING BROWSER...", AMBER)
 
-        def run():
-            from pipboy_auth import (
-                CLIENT_ID, CLIENT_SECRET,
-                device_login, firebase_sign_in,
-                save_token
-            )
-            try:
-                access = device_login(CLIENT_ID, CLIENT_SECRET)
-                auth   = firebase_sign_in(access)
-                auth["issued_at"] = int(time.time())
-                save_token(auth)
-                # Signal UI on main thread
-                QTimer.singleShot(0, lambda: self._on_login_success(auth))
-            except Exception as e:
-                QTimer.singleShot(0, lambda: self._on_login_error(str(e)))
-
-        threading.Thread(target=run, daemon=True).start()
+        self._login_worker = LoginWorker()
+        self._login_worker.success.connect(self._on_login_success)
+        self._login_worker.error.connect(self._on_login_error)
+        self._login_worker.status.connect(
+            lambda msg: self._login_screen.set_status(msg, AMBER))
+        self._login_worker.start()
 
     def _on_login_success(self, auth):
         self._session = auth
@@ -494,6 +508,7 @@ class PipBoyWindow(QMainWindow):
     def _on_login_error(self, msg):
         self._login_screen.set_busy(False)
         self._login_screen.set_status(f"ERROR: {msg}", RED)
+        self._login_worker = None
 
     def _on_signed_in(self, email):
         self._login_screen.hide()

@@ -180,14 +180,12 @@ def ensure_fresh_token(session):
         print("WARNING: no refresh_token in session -- run pipboy_auth.py --reauth")
         return session, token
 
-    issued = session.get("issued_at", 0)
-    # If issued_at missing or 0, treat as fresh to avoid unnecessary refresh
-    # on every launch with old token files. The inline retry will catch expiry.
-    if not issued:
-        return session, token
+    # If issued_at is missing, treat as expired so we proactively refresh
+    # rather than waiting for Firestore to return a 401.
+    issued = session.get("issued_at", 0) or 0
 
     age = int(time.time()) - issued
-    if age < TOKEN_EXPIRY:
+    if issued and age < TOKEN_EXPIRY:
         return session, token  # Still fresh
 
     # Token is old — refresh now before making any Firestore calls
