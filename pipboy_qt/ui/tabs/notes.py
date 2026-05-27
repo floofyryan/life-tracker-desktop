@@ -22,7 +22,8 @@ class NotesTab(QWidget):
         np=PipPanel()
         dr=QHBoxLayout(); dr.setSpacing(8)
         dr.addWidget(label("DATE:",TEXT_DIM,10))
-        dr.addWidget(label(fb.today_key(),GREEN,11)); dr.addStretch()
+        self._date_lbl = label(fb.today_key(),GREEN,11)
+        dr.addWidget(self._date_lbl); dr.addStretch()
         np.layout().addLayout(dr)
         self._note_text=QTextEdit()
         self._note_text.setMinimumHeight(160)
@@ -45,7 +46,8 @@ class NotesTab(QWidget):
         lay.addWidget(np); lay.addStretch(); scroll.setWidget(c)
         outer=QVBoxLayout(self); outer.setContentsMargins(0,0,0,0); outer.addWidget(scroll)
 
-    def update_data(self, data): pass  # Notes don't need data refresh
+    def update_data(self, data):
+        self._date_lbl.setText(fb.today_key())
 
     def _feedback(self,msg,color=GREEN):
         self._note_fb.setText(msg)

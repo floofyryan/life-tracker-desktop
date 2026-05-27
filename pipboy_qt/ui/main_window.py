@@ -115,7 +115,7 @@ class DataWorker(QThread):
 
         data["_token"] = token
         self.data_ready.emit(data)
-        ts = __import__("datetime").datetime.now().strftime("%H:%M:%S")
+        ts = _dt.now().strftime("%H:%M:%S")
         self.status_ready.emit(f"VAULT-TEC SYNC {ts}", GREEN_DIM)
 
     def stop(self):
