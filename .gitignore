@@ -1,0 +1,25 @@
+# Claude Code internal files
+.claude/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+*.spec
+
+# PyInstaller output
+*.exe
+
+# Environment
+.env
+venv/
+.venv/
+
+# Token/config files (never commit credentials)
+*.pipboy_token.json
+*.pipboy_config.json
